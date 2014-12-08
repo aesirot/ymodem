@@ -1,9 +1,5 @@
 package ru.sir.ymodem;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-
 /**
  * Uses table for irreducible polynomial:  1 + x^2 + x^15 + x^16
  */
@@ -45,34 +41,18 @@ public class CRC16 implements CRC {
         0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0,
     };
 
-    public static int calc(byte[] bytes) {
+    @Override
+    public int getCRCLength() {
+        return 2;
+    }
+
+    @Override
+    public long calcCRC(byte[] block) {
         int crc = 0x0000;
-        for (byte b : bytes) {
+        for (byte b : block) {
             crc = ((crc << 8) ^ table[((crc >> 8) ^ (0xff & b))]) & 0xFFFF;
         }
 
         return crc;
-    }
-
-    @Override
-    public boolean readCRCAndCheck(InputStream inputStream, byte[] block) throws IOException {
-        if (inputStream.available() < 2) {
-            return false; // strange case, but if there will be not enough bytes program will wait, wait, wait - so just avoid waiting
-        }
-        int checkSumma = inputStream.read() << 8;
-        checkSumma += inputStream.read();
-
-        return (checkSumma == calc(block));
-    }
-
-    @Override
-    public void writeCRC(OutputStream outputStream, byte[] block) throws IOException {
-        byte[] result = new byte[2];
-
-        int crc = CRC16.calc(block);
-        result[0] = (byte) ((crc & 0xff00) >> 8);
-        result[1] = (byte) (crc & 0xff);
-
-        outputStream.write(result);
     }
 }

@@ -45,7 +45,7 @@ public class YModem {
         //open file
         try (DataInputStream dataStream = new DataInputStream(Files.newInputStream(file))) {
 
-            Timer timer = new Timer(60_000).start();
+            Timer timer = new Timer(Modem.WAIT_FOR_RECEIVER_TIMEOUT).start();
             boolean useCRC16 = modem.waitReceiverRequest(timer);
             CRC crc;
             if (useCRC16)
@@ -65,7 +65,7 @@ public class YModem {
             byte[] block = new byte[1024];
             int blockNumber = 1;
             while ((dataLength = dataStream.read(block)) != -1) {
-                blockNumber = modem.sendBlock(blockNumber, block, dataLength, crc);
+                modem.sendBlock(blockNumber++, block, dataLength, crc);
             }
 
             modem.sendEOT();
@@ -90,7 +90,7 @@ public class YModem {
     }
 
     private void sendBatchStop() throws IOException {
-        Timer timer = new Timer(60_000).start();
+        Timer timer = new Timer(Modem.WAIT_FOR_RECEIVER_TIMEOUT).start();
         boolean useCRC16 = modem.waitReceiverRequest(timer);
         CRC crc;
         if (useCRC16)

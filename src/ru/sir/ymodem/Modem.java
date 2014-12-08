@@ -29,6 +29,11 @@ class Modem {
 
     protected static final int MAXERRORS = 10;
 
+    protected static final int BLOCK_TIMEOUT = 1000;
+    protected static final int REQUEST_TIMEOUT = 3000;
+    protected static final int WAIT_FOR_RECEIVER_TIMEOUT = 60_000;
+    protected static final int SEND_BLOCK_TIMEOUT = 10_000;
+
     private final InputStream inputStream;
     private final OutputStream outputStream;
 
@@ -87,7 +92,7 @@ class Modem {
         //open file
         try (DataInputStream dataStream = new DataInputStream(Files.newInputStream(file))) {
             int blockNumber = 1;
-            Timer timer = new Timer(60_000).start();
+            Timer timer = new Timer(WAIT_FOR_RECEIVER_TIMEOUT).start();
 
             boolean useCRC16 = waitReceiverRequest(timer);
             CRC crc;
@@ -103,7 +108,7 @@ class Modem {
             else
                 block = new byte[128];
             while ((dataLength = dataStream.read(block)) != -1) {
-                blockNumber = sendBlock(blockNumber, block, dataLength, crc);
+                sendBlock(blockNumber++, block, dataLength, crc);
             }
 
             sendEOT();
@@ -112,9 +117,9 @@ class Modem {
 
     protected void sendEOT() throws IOException {
         int errorCount = 0;
-        Timer timer = new Timer(1_000);
+        Timer timer = new Timer(BLOCK_TIMEOUT);
         int character;
-        while (errorCount<10) {
+        while (errorCount < 10) {
             sendByte(EOT);
             try {
                 character = readByte(timer.start());
@@ -130,10 +135,10 @@ class Modem {
         }
     }
 
-    protected int sendBlock(int blockNumber, byte[] block, int dataLength, CRC crc) throws IOException {
+    protected void sendBlock(int blockNumber, byte[] block, int dataLength, CRC crc) throws IOException {
         int errorCount;
         int character;
-        Timer timer = new Timer(10_000);
+        Timer timer = new Timer(SEND_BLOCK_TIMEOUT);
 
         if (dataLength < block.length) {
             block[dataLength] = CPMEOF;
@@ -152,16 +157,14 @@ class Modem {
             outputStream.write(~blockNumber);
 
             outputStream.write(block);
-
-            crc.writeCRC(outputStream, block);
+            writeCRC(block, crc);
             outputStream.flush();
 
             while (true) {
                 try {
                     character = readByte(timer);
                     if (character == ACK) {
-                        blockNumber++;
-                        break Lp;
+                        return;
                     } else if (character == NAK) {
                         errorCount++;
                         break;
@@ -175,10 +178,17 @@ class Modem {
             }
 
         }
-        if (errorCount == MAXERRORS) {
-            throw new IOException("Too many errors caught, abandoning transfer");
+
+        throw new IOException("Too many errors caught, abandoning transfer");
+    }
+
+    private void writeCRC(byte[] block, CRC crc) throws IOException {
+        byte[] crcBytes = new byte[crc.getCRCLength()];
+        long crcValue = crc.calcCRC(block);
+        for (int i = 0; i < crc.getCRCLength(); i++) {
+            crcBytes[crc.getCRCLength() - i - 1] = (byte) ((crcValue >> (8 * i)) & 0xFF);
         }
-        return blockNumber;
+        outputStream.write(crcBytes);
     }
 
     /**
@@ -276,41 +286,34 @@ class Modem {
         } else {
             requestStartByte = ST_C;
         }
-        // request transmission start (will be repeated after 10 second timeout for 10 times)
-        outputStream.write(requestStartByte);
-        outputStream.flush();
-        Timer timer = new Timer(3_000).start();
+
+        //Timer timer = new Timer(REQUEST_TIMEOUT).start();
         // wait for first block start
-        while (true) {
-            while (inputStream.available() > 0) {
-                character = inputStream.read();
-                if (character == SOH || character == STX) {
-                    //first block!
-                    return character;
+        Timer timer = new Timer(REQUEST_TIMEOUT);
+        while (errorCount < MAXERRORS) {
+            // request transmission start (will be repeated after 10 second timeout for 10 times)
+            sendByte(requestStartByte);
+            timer.start();
+            while (!timer.isExpired()) {
+                while (inputStream.available() > 0) {
+                    character = inputStream.read();
+                    if (character == SOH || character == STX) {
+                        //first block!
+                        return character;
+                    }
                 }
+                shortSleep();
             }
-
-            shortSleep();
-
-            if (timer.isExpired()) {
-                errorCount++;
-                if (errorCount == MAXERRORS) {
-                    interruptTransmission();
-                    throw new RuntimeException("Timeout, no data received from transmitter");
-                } else {
-                    // repeat transmission start request
-                    outputStream.write(requestStartByte);
-                    outputStream.flush();
-                }
-                timer.start();
-            }
+            errorCount++;
         }
+        interruptTransmission();
+        throw new RuntimeException("Timeout, no data received from transmitter");
     }
 
     protected int readNextBlockStart(boolean lastBlockResult) throws IOException {
         int character;
         int errorCount = 0;
-        Timer timer = new Timer(1000).start();
+        Timer timer = new Timer(BLOCK_TIMEOUT).start();
         while (true) {
             while (inputStream.available() > 0) {
                 character = inputStream.read();
@@ -328,7 +331,7 @@ class Modem {
                     throw new RuntimeException("Timeout, no data received from transmitter");
                 } else {
                     // repeat last block result and wait for next block one more time
-                    outputStream.write(lastBlockResult ? ACK : NAK);
+                    sendByte(lastBlockResult ? ACK : NAK);
                     timer.start();
                 }
             }
@@ -354,13 +357,13 @@ class Modem {
      * @throws java.io.IOException
      */
     protected void interruptTransmission() throws IOException {
-        outputStream.write(CAN);
-        outputStream.write(CAN);
+        sendByte(CAN);
+        sendByte(CAN);
     }
 
     protected byte[] readBlock(int blockNumber, boolean shortBlock, CRC crc) throws IOException, TimeoutException, RepeatedBlockException, SynchronizationLostException, InvalidBlockException {
         byte[] block;
-        Timer timer = new Timer(1000).start();
+        Timer timer = new Timer(BLOCK_TIMEOUT).start();
 
         if (shortBlock) {
             block = shortBlockBuffer;
@@ -387,19 +390,16 @@ class Modem {
         }
 
         // data
-        int i = 0;
-        Lx:
+        for (int i = 0; i < block.length; i++) {
+            block[i] = readByte(timer);
+        }
+
         while (true) {
-            while (inputStream.available() > 0) {
-                if (i < block.length) {
-                    block[i] = (byte) inputStream.read();
-                    i++;
-                } else {
-                    if (!crc.readCRCAndCheck(inputStream, block)) {
-                        throw new InvalidBlockException();
-                    }
-                    break Lx;
+            if (inputStream.available() >= crc.getCRCLength()) {
+                if (crc.calcCRC(block) != readCRC(crc)) {
+                    throw new InvalidBlockException();
                 }
+                break;
             }
 
             shortSleep();
@@ -410,6 +410,14 @@ class Modem {
         }
 
         return block;
+    }
+
+    private long readCRC(CRC crc) throws IOException {
+        long checkSumma = 0;
+        for (int j = 0; j < crc.getCRCLength(); j++) {
+            checkSumma = (checkSumma << 8) + inputStream.read();
+        }
+        return checkSumma;
     }
 
     private byte readByte(Timer timer) throws IOException, TimeoutException {
