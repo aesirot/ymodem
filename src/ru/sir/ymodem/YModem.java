@@ -61,12 +61,8 @@ public class YModem {
 
             modem.waitReceiverRequest(timer);
             //send data
-            int dataLength;
             byte[] block = new byte[1024];
-            int blockNumber = 1;
-            while ((dataLength = dataStream.read(block)) != -1) {
-                modem.sendBlock(blockNumber++, block, dataLength, crc);
-            }
+            modem.sendDataBlocks(dataStream, 1, crc, block);
 
             modem.sendEOT();
         }
@@ -81,7 +77,7 @@ public class YModem {
      * @param files
      * @throws java.io.IOException
      */
-    public void send(Path... files) throws IOException {
+    public void batchSend(Path... files) throws IOException {
         for (Path file : files) {
             send(file);
         }
@@ -150,13 +146,15 @@ public class YModem {
         Path filePath;
         try {
             CRC crc = new CRC16();
-            int character = modem.requestTransmissionStart(true);
+            int errorCount = 0;
 
             // process block 0
             byte[] block;
+            int character;
             while (true) {
-                int errorCount = 0;
+                character = modem.requestTransmissionStart(true);
                 try {
+                    // read file name from zero block
                     block = modem.readBlock(0, (character == Modem.SOH), crc);
 
                     if (inDirectory) {
@@ -178,7 +176,6 @@ public class YModem {
                     }
                     dataOutput = new DataOutputStream(Files.newOutputStream(filePath));
                     modem.sendByte(Modem.ACK);
-                    modem.sendByte(Modem.ST_C);
                     break;
                 } catch (TimeoutException | Modem.InvalidBlockException e) {
                     errorCount++;
@@ -192,16 +189,10 @@ public class YModem {
                     modem.interruptTransmission();
                     throw new IOException("Fatal transmission error", e);
                 }
-
-                //wait for next block
-                character = modem.readNextBlockStart(true);
             }
 
-
-            //wait for next block
-            character = modem.readNextBlockStart(true);
-            //process data blocks like in XModem protocol (with 1K block and CRC-16)
-            modem.processDataBlocks(crc, 1, character, dataOutput);
+            //receive data blocks
+            modem.receive(filePath, true);
         } finally {
             if (dataOutput != null) {
                 dataOutput.close();

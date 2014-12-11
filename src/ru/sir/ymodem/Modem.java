@@ -91,7 +91,6 @@ class Modem {
     protected void send(Path file, boolean useBlock1K) throws IOException {
         //open file
         try (DataInputStream dataStream = new DataInputStream(Files.newInputStream(file))) {
-            int blockNumber = 1;
             Timer timer = new Timer(WAIT_FOR_RECEIVER_TIMEOUT).start();
 
             boolean useCRC16 = waitReceiverRequest(timer);
@@ -102,16 +101,20 @@ class Modem {
                 crc = new CRC8();
 
             byte[] block;
-            int dataLength;
             if (useBlock1K)
                 block = new byte[1024];
             else
                 block = new byte[128];
-            while ((dataLength = dataStream.read(block)) != -1) {
-                sendBlock(blockNumber++, block, dataLength, crc);
-            }
+            sendDataBlocks(dataStream, 1, crc, block);
 
             sendEOT();
+        }
+    }
+
+    protected void sendDataBlocks(DataInputStream dataStream, int blockNumber, CRC crc, byte[] block) throws IOException {
+        int dataLength;
+        while ((dataLength = dataStream.read(block)) != -1) {
+            sendBlock(blockNumber++, block, dataLength, crc);
         }
     }
 
@@ -145,7 +148,6 @@ class Modem {
         }
         errorCount = 0;
 
-        Lp:
         while (errorCount < MAXERRORS) {
             timer.start();
 
@@ -221,21 +223,21 @@ class Modem {
         }
     }
 
-    protected void processDataBlocks(CRC crc, int blockNumber, int character, DataOutputStream dataOutput) throws IOException {
+    protected void processDataBlocks(CRC crc, int blockNumber, int blockInitialCharacter, DataOutputStream dataOutput) throws IOException {
         // read blocks until EOT
         boolean result = false;
         boolean shortBlock;
         byte[] block;
         while (true) {
             int errorCount = 0;
-            if (character == EOT) {
+            if (blockInitialCharacter == EOT) {
                 // end of transmission
                 sendByte(ACK);
                 return;
             }
 
             //read and process block
-            shortBlock = (character == SOH);
+            shortBlock = (blockInitialCharacter == SOH);
             try {
                 block = readBlock(blockNumber, shortBlock, crc);
                 dataOutput.write(block);
@@ -261,7 +263,7 @@ class Modem {
             }
 
             //wait for next block
-            character = readNextBlockStart(result);
+            blockInitialCharacter = readNextBlockStart(result);
         }
     }
 
@@ -287,24 +289,23 @@ class Modem {
             requestStartByte = ST_C;
         }
 
-        //Timer timer = new Timer(REQUEST_TIMEOUT).start();
         // wait for first block start
         Timer timer = new Timer(REQUEST_TIMEOUT);
         while (errorCount < MAXERRORS) {
             // request transmission start (will be repeated after 10 second timeout for 10 times)
             sendByte(requestStartByte);
             timer.start();
-            while (!timer.isExpired()) {
-                while (inputStream.available() > 0) {
-                    character = inputStream.read();
+            try {
+                while (true) {
+                    character = readByte(timer);
+
                     if (character == SOH || character == STX) {
-                        //first block!
                         return character;
                     }
                 }
-                shortSleep();
+            } catch (TimeoutException ignored) {
+                errorCount++;
             }
-            errorCount++;
         }
         interruptTransmission();
         throw new RuntimeException("Timeout, no data received from transmitter");
@@ -313,30 +314,27 @@ class Modem {
     protected int readNextBlockStart(boolean lastBlockResult) throws IOException {
         int character;
         int errorCount = 0;
-        Timer timer = new Timer(BLOCK_TIMEOUT).start();
+        Timer timer = new Timer(BLOCK_TIMEOUT);
         while (true) {
-            while (inputStream.available() > 0) {
-                character = inputStream.read();
+            timer.start();
+            try {
+                while (true) {
+                    character = readByte(timer);
 
-                if (character == SOH || character == STX || character == EOT) {
-                    return character;
+                    if (character == SOH || character == STX || character == EOT) {
+                        return character;
+                    }
                 }
-            }
-
-            shortSleep();
-
-            if (timer.isExpired()) {
-                if (errorCount++ == MAXERRORS) {
+            } catch (TimeoutException ignored) {
+                // repeat last block result and wait for next block one more time
+                if (++errorCount < MAXERRORS) {
+                    sendByte(lastBlockResult ? ACK : NAK);
+                } else {
                     interruptTransmission();
                     throw new RuntimeException("Timeout, no data received from transmitter");
-                } else {
-                    // repeat last block result and wait for next block one more time
-                    sendByte(lastBlockResult ? ACK : NAK);
-                    timer.start();
                 }
             }
         }
-
     }
 
     private void shortSleep() {
